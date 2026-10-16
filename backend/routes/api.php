@@ -28,4 +28,8 @@ Route::middleware('auth:api')->group(function () {
     Route::get('/users', [TaskController::class, 'users']);
     Route::post('/tasks/{id}/comments', [TaskController::class, 'storeComment']);
 
+    Route::post('/tasks/bulk-status', [TaskController::class, 'bulkUpdateStatus']);
+    Route::post('/tasks/export', [TaskController::class, 'exportReport']);
+    Route::get('/tasks/exports/{fileName}', [TaskController::class, 'downloadExport']);
+
 });
