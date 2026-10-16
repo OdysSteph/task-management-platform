@@ -18,6 +18,14 @@ Route::middleware('auth:api')->group(function () {
     Route::delete('/tasks/{id}', [TaskController::class, 'destroy']);
 
     Route::post('/tasks/{id}/attachments', [TaskAttachmentController::class, 'store']);
+    Route::post('/tasks/{id}/attachments/chunk', [TaskAttachmentController::class, 'chunkUpload']);
+    Route::post('/tasks/bulk-status', [TaskController::class, 'bulkUpdateStatus']);
+    Route::post('/tasks/export', [TaskController::class, 'exportReport']);
+    Route::get('/tasks/{id}/attachments/versions', [TaskAttachmentController::class, 'versions']);
     Route::get('/attachments/{id}/download', [TaskAttachmentController::class, 'download']);
     Route::delete('/attachments/{id}', [TaskAttachmentController::class, 'destroy']);
+
+    Route::get('/users', [TaskController::class, 'users']);
+    Route::post('/tasks/{id}/comments', [TaskController::class, 'storeComment']);
+
 });
