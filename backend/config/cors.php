@@ -19,9 +19,9 @@ return [
 
     'allowed_methods' => ['*'],
 
-    'allowed_origins' => [
-        'https://task-management-platform-p8svn9l1g.vercel.app',
-    ],
+    'allowed_origins' => array_filter(
+        array_map('trim', explode(',', env('FRONTEND_URL', 'http://localhost:5173')))
+    ),
 
     'allowed_origins_patterns' => [],
 
