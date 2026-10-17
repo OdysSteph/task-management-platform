@@ -1,7 +1,28 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import './App.css';
 
-const API_BASE = import.meta.env.VITE_API_BASE_URL;
+const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000/api';
+
+const ROLE_INFO = {
+  admin: {
+    label: 'ADMIN — Full Access',
+    bg: '#fee2e2',
+    color: '#b91c1c',
+    desc: 'Akses penuh: Buat, Edit, Hapus semua task, Bulk Action, & Export Laporan.',
+  },
+  manager: {
+    label: 'MANAGER — Team Lead',
+    bg: '#dbeafe',
+    color: '#1d4ed8',
+    desc: 'Kelola tim: Buat & Edit semua task, Bulk Action, Export, dan hapus task buatan sendiri.',
+  },
+  member: {
+    label: 'MEMBER — Contributor',
+    bg: '#dcfce7',
+    color: '#15803d',
+    desc: 'Fokus eksekusi: Update status pada task yang ditugaskan kepada Anda, unggah file, & diskusi.',
+  },
+};
 
 export default function App() {
   // --- Auth State ---
@@ -12,6 +33,13 @@ export default function App() {
   });
   const [loginForm, setLoginForm] = useState({ email: 'admin@example.com', password: 'password123' });
   const [authLoading, setAuthLoading] = useState(false);
+
+  // Role Flags
+  const currentRole = user?.role || 'member';
+  const isAdmin = currentRole === 'admin';
+  const isManager = currentRole === 'manager';
+  const isMember = currentRole === 'member';
+  const canManageTasks = isAdmin || isManager;
 
   // --- Tasks, Users & Filter State ---
   const [tasks, setTasks] = useState([]);
@@ -60,7 +88,6 @@ export default function App() {
     }, 3500);
   }, []);
 
-  // Helper Fetch API dengan JWT Bearer Token
   const apiFetch = useCallback(
     async (endpoint, options = {}) => {
       const headers = {
@@ -93,7 +120,6 @@ export default function App() {
     [token, notify]
   );
 
-  // --- Fetch Daftar Tasks ---
   const fetchTasks = useCallback(
     async (silent = false) => {
       if (!token) return;
@@ -121,7 +147,6 @@ export default function App() {
     [token, filters, apiFetch, notify]
   );
 
-  // --- Fetch Detail Task (beserta Attachments & Comments) ---
   const fetchTaskDetail = useCallback(
     async (taskId) => {
       try {
@@ -134,19 +159,17 @@ export default function App() {
     [apiFetch, notify]
   );
 
-  // --- Fetch Users untuk Dropdown Assignee ---
   useEffect(() => {
     if (!token) return;
     apiFetch('/users')
       .then((res) => setUsersList(res.data || []))
-      .catch(() => { });
+      .catch(() => {});
   }, [token, apiFetch]);
 
   useEffect(() => {
     fetchTasks();
   }, [fetchTasks]);
 
-  // --- Real-time Sync (BroadcastChannel antar-tab + Live Polling 8 detik) ---
   const broadcastEvent = useCallback((type, payload = {}) => {
     if (channelRef.current) {
       channelRef.current.postMessage({ type, payload });
@@ -165,7 +188,7 @@ export default function App() {
           fetchTaskDetail(activeTask.id);
         }
         if (type === 'TASK_UPDATED') {
-          notify('Real-time: Data task diperbarui oleh pengguna lain.', 'info');
+          notify('Real-time: Data task diperbarui.', 'info');
         } else if (type === 'COMMENT_ADDED') {
           notify('Real-time: Komentar baru masuk.', 'info');
         }
@@ -199,7 +222,8 @@ export default function App() {
       localStorage.setItem('auth_user', JSON.stringify(profile));
       setToken(jwt);
       setUser(profile);
-      notify(`Selamat datang, ${profile.name}!`, 'success');
+      setSelectedIds([]);
+      notify(`Login berhasil sebagai ${profile.name} (${profile.role.toUpperCase()})!`, 'success');
     } catch (err) {
       notify(err.message, 'error');
     } finally {
@@ -211,12 +235,13 @@ export default function App() {
     try {
       await apiFetch('/auth/logout', { method: 'POST' });
     } catch {
-      // Abaikan jika token sudah expired
+      // Abaikan
     }
     localStorage.removeItem('jwt_token');
     localStorage.removeItem('auth_user');
     setToken('');
     setUser(null);
+    setSelectedIds([]);
     notify('Anda telah logout.', 'info');
   };
 
@@ -250,11 +275,13 @@ export default function App() {
   const handleSaveTask = async (e) => {
     e.preventDefault();
     try {
-      const payload = {
-        ...taskForm,
-        assigned_user_id: taskForm.assigned_user_id ? Number(taskForm.assigned_user_id) : null,
-        due_date: taskForm.due_date || null,
-      };
+      const payload = isMember
+        ? { status: taskForm.status }
+        : {
+            ...taskForm,
+            assigned_user_id: taskForm.assigned_user_id ? Number(taskForm.assigned_user_id) : null,
+            due_date: taskForm.due_date || null,
+          };
 
       if (editingTask) {
         await apiFetch(`/tasks/${editingTask.id}`, {
@@ -278,6 +305,27 @@ export default function App() {
     }
   };
 
+  // Quick Status Change khusus Member pada task miliknya
+  const handleQuickMemberStatus = async (taskId, newStatus) => {
+    try {
+      await apiFetch(`/tasks/${taskId}`, {
+        method: 'PUT',
+        body: JSON.stringify({ status: newStatus }),
+      });
+      notify(`Status task diperbarui menjadi ${newStatus.replace('_', ' ')}!`);
+      fetchTasks();
+      broadcastEvent('TASK_UPDATED', { taskId });
+    } catch (err) {
+      notify(err.message, 'error');
+    }
+  };
+
+  const canDeleteTask = (task) => {
+    if (isAdmin) return true;
+    if (isManager && Number(task.created_by) === Number(user?.id)) return true;
+    return false;
+  };
+
   const handleDeleteTask = async (id) => {
     if (!window.confirm('Yakin ingin menghapus task ini?')) return;
     try {
@@ -291,7 +339,7 @@ export default function App() {
     }
   };
 
-  // --- Handlers: Bulk Update & Export Queue (Part 1.4 Integration) ---
+  // --- Handlers: Bulk Update & Export Queue ---
   const toggleSelectTask = (id) => {
     setSelectedIds((prev) => (prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id]));
   };
@@ -349,7 +397,7 @@ export default function App() {
     }
   };
 
-  // --- Handlers: Drag-and-Drop File Upload dengan Progress Bar ---
+  // --- Handlers: Drag-and-Drop File Upload ---
   const uploadFileWithProgress = (file) => {
     if (!activeTask || !file) return;
     setUploadingFile(true);
@@ -380,11 +428,7 @@ export default function App() {
           fetchTasks(true);
           broadcastEvent('TASK_UPDATED', { taskId: activeTask.id });
         } else {
-          if(xhr.status == 422){
-            notify('Gagal mengunggah file, max 2MB.', 'error');
-          } else {
-            notify(res.message || 'Gagal mengunggah file.', 'error');
-          }
+          notify(res.message || 'Gagal mengunggah file.', 'error');
         }
       } catch {
         notify('Gagal memproses respons server.', 'error');
@@ -436,7 +480,6 @@ export default function App() {
     }
   };
 
-  // --- Handler: Tambah Komentar Real-time ---
   const handleAddComment = async (e) => {
     e.preventDefault();
     if (!commentInput.trim() || !activeTask) return;
@@ -454,25 +497,51 @@ export default function App() {
     }
   };
 
-  // ================= RENDER 1: HALAMAN LOGIN =================
+  // ================= RENDER 1: HALAMAN LOGIN DENGAN PILIHAN 3 ROLE =================
   if (!token) {
     return (
       <div className="auth-wrapper">
-        <div className="auth-card">
-          <h1>Task Management Platform</h1>
-          <p>Silakan masuk menggunakan akun JWT Anda</p>
+        <div className="auth-card" style={{ maxWidth: '460px' }}>
+          <h1>TaskHub Pro</h1>
+          <p>Pilih akun demo di bawah untuk menguji perbedaan hak akses (RBAC):</p>
 
-          <div className="demo-box">
-            <div>
-              <strong>Akun Demo:</strong> admin@example.com / password123
-            </div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '0.5rem', marginBottom: '1rem' }}>
             <button
               type="button"
               className="btn btn-outline btn-sm"
+              style={{ borderColor: loginForm.email === 'admin@example.com' ? '#2563eb' : undefined }}
               onClick={() => setLoginForm({ email: 'admin@example.com', password: 'password123' })}
             >
-              Isi Otomatis
+              👑 Admin
             </button>
+            <button
+              type="button"
+              className="btn btn-outline btn-sm"
+              style={{ borderColor: loginForm.email === 'manager@example.com' ? '#2563eb' : undefined }}
+              onClick={() => setLoginForm({ email: 'manager@example.com', password: 'password123' })}
+            >
+              📋 Manager
+            </button>
+            <button
+              type="button"
+              className="btn btn-outline btn-sm"
+              style={{ borderColor: loginForm.email === 'member@example.com' ? '#2563eb' : undefined }}
+              onClick={() => setLoginForm({ email: 'member@example.com', password: 'password123' })}
+            >
+              👨‍💻 Member
+            </button>
+          </div>
+
+          <div className="demo-box" style={{ display: 'block', lineHeight: '1.4' }}>
+            {loginForm.email === 'admin@example.com' && (
+              <span><strong>Role Admin:</strong> Full akses CRUD semua task, Bulk Action, Export, & Hapus task siapa saja.</span>
+            )}
+            {loginForm.email === 'manager@example.com' && (
+              <span><strong>Role Manager:</strong> Buat & Edit task tim, Bulk Action, Export, & hapus task buatan sendiri.</span>
+            )}
+            {loginForm.email === 'member@example.com' && (
+              <span><strong>Role Member:</strong> Hanya ubah status pada task yang ditugaskan kepadanya, upload file, & komentar.</span>
+            )}
           </div>
 
           <form onSubmit={handleLogin}>
@@ -513,6 +582,8 @@ export default function App() {
     );
   }
 
+  const roleBadge = ROLE_INFO[currentRole] || ROLE_INFO.member;
+
   // ================= RENDER 2: DASHBOARD UTAMA =================
   return (
     <div className="app-shell">
@@ -520,20 +591,62 @@ export default function App() {
         <div className="brand">
           <span>TaskHub Pro</span>
           <span className="live-pill">
-            <span className="live-dot" /> Live Sync Active
+            <span className="live-dot" /> Live Sync
           </span>
         </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap' }}>
+          <span
+            className="badge"
+            style={{ background: roleBadge.bg, color: roleBadge.color, padding: '0.25rem 0.7rem' }}
+          >
+            {roleBadge.label}
+          </span>
           <span style={{ fontSize: '0.88rem', color: 'var(--muted)' }}>
-            Halo, <strong>{user?.name}</strong> ({user?.role})
+            <strong>{user?.name}</strong>
           </span>
           <button className="btn btn-outline btn-sm" onClick={handleLogout}>
-            Logout
+            Ganti Role / Logout
           </button>
         </div>
       </header>
 
       <main className="container">
+        {/* Banner Informasi Hak Akses Role Aktif */}
+        <div
+          style={{
+            background: roleBadge.bg,
+            color: roleBadge.color,
+            padding: '0.7rem 1rem',
+            borderRadius: '8px',
+            marginBottom: '1rem',
+            fontSize: '0.85rem',
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            flexWrap: 'wrap',
+            gap: '0.5rem',
+          }}
+        >
+          <span>
+            <strong>Mode Hak Akses ({currentRole.toUpperCase()}):</strong> {roleBadge.desc}
+          </span>
+          {isMember && (
+            <button
+              className="btn btn-outline btn-sm"
+              style={{ background: '#fff' }}
+              onClick={() =>
+                setFilters((prev) => ({
+                  ...prev,
+                  assigned_user_id: prev.assigned_user_id ? '' : String(user.id),
+                  page: 1,
+                }))
+              }
+            >
+              {filters.assigned_user_id === String(user?.id) ? 'Tampilkan Semua Task' : 'Filter: Hanya Task Saya'}
+            </button>
+          )}
+        </div>
+
         {/* Statistik Ringkas */}
         <div className="stats-grid">
           <div className="stat-card">
@@ -547,12 +660,12 @@ export default function App() {
             </strong>
           </div>
           <div className="stat-card">
-            <span>Dipilih (Bulk Action)</span>
-            <strong>{selectedIds.length} Item</strong>
+            <span>Role Anda</span>
+            <strong style={{ textTransform: 'capitalize' }}>{currentRole}</strong>
           </div>
         </div>
 
-        {/* Baris Filter, Search, Sort & Tombol Aksi */}
+        {/* Baris Filter, Search, Sort & Tombol Aksi Sesuai Role */}
         <div className="toolbar">
           <div className="filter-group">
             <input
@@ -596,34 +709,37 @@ export default function App() {
             </select>
           </div>
 
-          <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
-            {selectedIds.length > 0 && (
-              <select
-                className="select"
-                defaultValue=""
-                onChange={(e) => {
-                  handleBulkStatus(e.target.value);
-                  e.target.value = '';
-                }}
-              >
-                <option value="" disabled>
-                  Ubah Status ({selectedIds.length})...
-                </option>
-                <option value="in_progress">Set In Progress</option>
-                <option value="completed">Set Completed</option>
-                <option value="cancelled">Set Cancelled</option>
-              </select>
-            )}
-            <button className="btn btn-outline btn-sm" onClick={() => handleExportReport('csv')}>
-              Export CSV
-            </button>
-            <button className="btn btn-outline btn-sm" onClick={() => handleExportReport('pdf')}>
-              Export PDF
-            </button>
-            <button className="btn btn-primary" onClick={openCreateModal}>
-              + Buat Task
-            </button>
-          </div>
+          {/* Tombol Manajerial: Hanya Muncul untuk Admin & Manager */}
+          {canManageTasks && (
+            <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+              {selectedIds.length > 0 && (
+                <select
+                  className="select"
+                  defaultValue=""
+                  onChange={(e) => {
+                    handleBulkStatus(e.target.value);
+                    e.target.value = '';
+                  }}
+                >
+                  <option value="" disabled>
+                    Bulk Status ({selectedIds.length})...
+                  </option>
+                  <option value="in_progress">Set In Progress</option>
+                  <option value="completed">Set Completed</option>
+                  <option value="cancelled">Set Cancelled</option>
+                </select>
+              )}
+              <button className="btn btn-outline btn-sm" onClick={() => handleExportReport('csv')}>
+                Export CSV
+              </button>
+              <button className="btn btn-outline btn-sm" onClick={() => handleExportReport('pdf')}>
+                Export PDF
+              </button>
+              <button className="btn btn-primary" onClick={openCreateModal}>
+                + Buat Task
+              </button>
+            </div>
+          )}
         </div>
 
         {/* Daftar Tasks */}
@@ -635,44 +751,83 @@ export default function App() {
           </div>
         ) : (
           <div className="task-list">
-            {tasks.map((task) => (
-              <div key={task.id} className="task-card">
-                <div className="task-main">
-                  <input
-                    type="checkbox"
-                    checked={selectedIds.includes(task.id)}
-                    onChange={() => toggleSelectTask(task.id)}
-                    style={{ marginTop: '0.35rem', cursor: 'pointer' }}
-                  />
-                  <div className="task-info">
-                    <h3 onClick={() => fetchTaskDetail(task.id)}>{task.title}</h3>
-                    <p style={{ fontSize: '0.86rem', color: 'var(--muted)' }}>
-                      {task.description || 'Tidak ada deskripsi.'}
-                    </p>
-                    <div className="task-meta">
-                      <span className={`badge status-${task.status}`}>{task.status.replace('_', ' ')}</span>
-                      <span className={`badge priority-${task.priority}`}>{task.priority}</span>
-                      <span>Assignee: <strong>{task.assignee?.name || 'Unassigned'}</strong></span>
-                      <span>Due: {task.due_date ? new Date(task.due_date).toLocaleDateString('id-ID') : '-'}</span>
-                      <span>📎 {task.attachments_count || 0} File</span>
-                      <span>💬 {task.comments_count || 0} Komentar</span>
+            {tasks.map((task) => {
+              const isAssignedToMe = Number(task.assigned_user_id) === Number(user?.id);
+
+              return (
+                <div key={task.id} className="task-card">
+                  <div className="task-main">
+                    {canManageTasks && (
+                      <input
+                        type="checkbox"
+                        checked={selectedIds.includes(task.id)}
+                        onChange={() => toggleSelectTask(task.id)}
+                        style={{ marginTop: '0.35rem', cursor: 'pointer' }}
+                      />
+                    )}
+                    <div className="task-info">
+                      <h3 onClick={() => fetchTaskDetail(task.id)}>
+                        {task.title}{' '}
+                        {isAssignedToMe && (
+                          <span
+                            className="badge"
+                            style={{ background: '#dcfce7', color: '#15803d', marginLeft: '0.4rem' }}
+                          >
+                            Ditugaskan ke Anda
+                          </span>
+                        )}
+                      </h3>
+                      <p style={{ fontSize: '0.86rem', color: 'var(--muted)' }}>
+                        {task.description || 'Tidak ada deskripsi.'}
+                      </p>
+                      <div className="task-meta">
+                        <span className={`badge status-${task.status}`}>{task.status.replace('_', ' ')}</span>
+                        <span className={`badge priority-${task.priority}`}>{task.priority}</span>
+                        <span>
+                          Assignee: <strong>{task.assignee?.name || 'Unassigned'}</strong>
+                        </span>
+                        <span>Pembuat: {task.creator?.name || '-'}</span>
+                        <span>Due: {task.due_date ? new Date(task.due_date).toLocaleDateString('id-ID') : '-'}</span>
+                        <span>📎 {task.attachments_count || 0} File</span>
+                        <span>💬 {task.comments_count || 0} Komentar</span>
+                      </div>
                     </div>
                   </div>
-                </div>
 
-                <div style={{ display: 'flex', gap: '0.4rem' }}>
-                  <button className="btn btn-outline btn-sm" onClick={() => fetchTaskDetail(task.id)}>
-                    Detail & File
-                  </button>
-                  <button className="btn btn-outline btn-sm" onClick={() => openEditModal(task)}>
-                    Edit
-                  </button>
-                  <button className="btn btn-danger btn-sm" onClick={() => handleDeleteTask(task.id)}>
-                    Hapus
-                  </button>
+                  {/* Aksi per Baris Disesuaikan dengan Role */}
+                  <div style={{ display: 'flex', gap: '0.4rem', alignItems: 'center', flexWrap: 'wrap' }}>
+                    {isMember && isAssignedToMe && (
+                      <select
+                        className="select"
+                        style={{ padding: '0.3rem 0.5rem', fontSize: '0.8rem', width: 'auto' }}
+                        value={task.status}
+                        onChange={(e) => handleQuickMemberStatus(task.id, e.target.value)}
+                      >
+                        <option value="pending">Status: Pending</option>
+                        <option value="in_progress">Status: In Progress</option>
+                        <option value="completed">Status: Completed</option>
+                      </select>
+                    )}
+
+                    <button className="btn btn-outline btn-sm" onClick={() => fetchTaskDetail(task.id)}>
+                      Detail & File
+                    </button>
+
+                    {canManageTasks && (
+                      <button className="btn btn-outline btn-sm" onClick={() => openEditModal(task)}>
+                        Edit
+                      </button>
+                    )}
+
+                    {canDeleteTask(task) && (
+                      <button className="btn btn-danger btn-sm" onClick={() => handleDeleteTask(task.id)}>
+                        Hapus
+                      </button>
+                    )}
+                  </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
 
@@ -812,7 +967,6 @@ export default function App() {
               {activeTask.description || 'Tidak ada deskripsi.'}
             </p>
 
-            {/* Bagian 1: Drag & Drop File Upload + Progress Bar */}
             <h3 style={{ fontSize: '0.95rem', marginBottom: '0.5rem' }}>
               Lampiran File ({activeTask.attachments?.length || 0})
             </h3>
@@ -867,15 +1021,16 @@ export default function App() {
                     <button className="btn btn-outline btn-sm" onClick={() => handleDownloadAttachment(att)}>
                       Unduh
                     </button>
-                    <button className="btn btn-danger btn-sm" onClick={() => handleDeleteAttachment(att.id)}>
-                      Hapus
-                    </button>
+                    {canManageTasks && (
+                      <button className="btn btn-danger btn-sm" onClick={() => handleDeleteAttachment(att.id)}>
+                        Hapus
+                      </button>
+                    )}
                   </div>
                 </div>
               ))}
             </div>
 
-            {/* Bagian 2: Real-time Comments */}
             <h3 style={{ fontSize: '0.95rem', marginBottom: '0.5rem' }}>
               Diskusi & Komentar Real-time ({activeTask.comments?.length || 0})
             </h3>
@@ -912,7 +1067,6 @@ export default function App() {
         </div>
       )}
 
-      {/* Toast Notification Stack */}
       <div className="toast-container">
         {toasts.map((t) => (
           <div key={t.id} className={`toast toast-${t.type}`}>

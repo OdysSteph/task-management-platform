@@ -18,6 +18,14 @@ use Symfony\Component\HttpFoundation\StreamedResponse;
 
 class TaskController extends Controller
 {
+    protected function currentUser(): ?User
+    {
+        /** @var User|null $account */
+        $account = auth('api')->user();
+
+        return $account;
+    }
+
     public function index(Request $request): JsonResponse
     {
         $builder = Task::query()
@@ -64,6 +72,16 @@ class TaskController extends Controller
 
     public function store(Request $request): JsonResponse
     {
+        $actor = $this->currentUser();
+
+        // RBAC: Hanya Admin dan Manager yang boleh membuat task baru
+        if ($actor && $actor->role === 'member') {
+            return response()->json([
+                'success' => false,
+                'message' => 'Akses ditolak: Role Member tidak diizinkan membuat task baru.',
+            ], 403);
+        }
+
         $payload = $request->validate([
             'title' => ['required', 'string', 'max:255'],
             'description' => ['nullable', 'string'],
@@ -73,7 +91,7 @@ class TaskController extends Controller
             'due_date' => ['nullable', 'date'],
         ]);
 
-        $payload['created_by'] = auth('api')->id();
+        $payload['created_by'] = $actor?->id;
 
         $taskItem = Task::create($payload);
 
@@ -91,7 +109,30 @@ class TaskController extends Controller
     public function update(Request $request, int $id): JsonResponse
     {
         $taskItem = Task::findOrFail($id);
+        $actor = $this->currentUser();
         $oldAssignee = $taskItem->assigned_user_id;
+
+        // RBAC untuk Role Member: Hanya boleh mengubah status pada task yang ditugaskan kepadanya
+        if ($actor && $actor->role === 'member') {
+            if ((int) $taskItem->assigned_user_id !== (int) $actor->id) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Akses ditolak: Anda hanya dapat memperbarui status task yang ditugaskan kepada Anda.',
+                ], 403);
+            }
+
+            $memberPayload = $request->validate([
+                'status' => ['required', Rule::in(['pending', 'in_progress', 'completed', 'cancelled'])],
+            ]);
+
+            $taskItem->update(['status' => $memberPayload['status']]);
+
+            return response()->json([
+                'success' => true,
+                'message' => 'Status task berhasil diperbarui.',
+                'data' => $taskItem->fresh(['assignee:id,name,email', 'creator:id,name,email']),
+            ]);
+        }
 
         $payload = $request->validate([
             'title' => ['sometimes', 'required', 'string', 'max:255'],
@@ -118,6 +159,23 @@ class TaskController extends Controller
     public function destroy(int $id): JsonResponse
     {
         $taskItem = Task::findOrFail($id);
+        $actor = $this->currentUser();
+
+        // RBAC: Member dilarang menghapus; Manager hanya boleh menghapus task buatannya sendiri
+        if ($actor && $actor->role === 'member') {
+            return response()->json([
+                'success' => false,
+                'message' => 'Akses ditolak: Role Member tidak dapat menghapus task.',
+            ], 403);
+        }
+
+        if ($actor && $actor->role === 'manager' && (int) $taskItem->created_by !== (int) $actor->id) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Akses ditolak: Manager hanya dapat menghapus task yang dibuatnya sendiri.',
+            ], 403);
+        }
+
         $taskItem->delete();
 
         return response()->json([
@@ -128,6 +186,15 @@ class TaskController extends Controller
 
     public function bulkUpdateStatus(Request $request): JsonResponse
     {
+        $actor = $this->currentUser();
+
+        if ($actor && $actor->role === 'member') {
+            return response()->json([
+                'success' => false,
+                'message' => 'Akses ditolak: Fitur Bulk Update hanya untuk Admin dan Manager.',
+            ], 403);
+        }
+
         $validated = $request->validate([
             'task_ids' => ['required', 'array', 'min:1'],
             'task_ids.*' => ['integer', 'exists:tasks,id'],
@@ -137,7 +204,7 @@ class TaskController extends Controller
         BulkUpdateTaskStatusJob::dispatchSync(
             $validated['task_ids'],
             $validated['status'],
-            (int) auth('api')->id()
+            (int) $actor?->id
         );
 
         return response()->json([
@@ -149,6 +216,15 @@ class TaskController extends Controller
 
     public function exportReport(Request $request): JsonResponse
     {
+        $actor = $this->currentUser();
+
+        if ($actor && $actor->role === 'member') {
+            return response()->json([
+                'success' => false,
+                'message' => 'Akses ditolak: Fitur Export Laporan hanya untuk Admin dan Manager.',
+            ], 403);
+        }
+
         $validated = $request->validate([
             'format' => ['required', Rule::in(['csv', 'pdf'])],
             'status' => ['nullable', Rule::in(['pending', 'in_progress', 'completed', 'cancelled'])],
